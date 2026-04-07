@@ -248,6 +248,27 @@ impl<'a> McpToolSession<'a> {
             .unwrap_or_else(|| fallback_label.to_string())
     }
 
+    /// Returns true if the bound server label belongs to an internal server.
+    pub fn is_internal_server_label(&self, server_label: &str) -> bool {
+        self.all_mcp_servers
+            .iter()
+            .find(|binding| binding.label == server_label)
+            .is_some_and(|binding| self.is_internal_server_key(&binding.server_key))
+    }
+
+    /// Returns true if the given tool resolves to an internal server.
+    pub fn is_internal_tool(&self, tool_name: &str) -> bool {
+        self.exposed_name_map
+            .get(tool_name)
+            .is_some_and(|binding| self.is_internal_server_key(&binding.server_key))
+    }
+
+    fn is_internal_server_key(&self, server_key: &str) -> bool {
+        self.orchestrator
+            .internal_server_names()
+            .contains(server_key)
+    }
+
     /// List tools for a single server key.
     ///
     /// Useful for emitting per-server `mcp_list_tools` items.
@@ -664,6 +685,7 @@ mod tests {
                     tools: None,
                     builtin_type: Some(BuiltinToolType::WebSearchPreview),
                     builtin_tool_name: Some("brave_web_search".to_string()),
+                    internal: false,
                 },
                 McpServerConfig {
                     name: "regular-server".to_string(),
@@ -677,6 +699,7 @@ mod tests {
                     tools: None,
                     builtin_type: None,
                     builtin_tool_name: None,
+                    internal: false,
                 },
             ],
             ..Default::default()
@@ -747,6 +770,51 @@ mod tests {
         let listed = session.list_tools_for_server("server1");
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].tool_name(), "brave_web_search");
+    }
+
+    #[test]
+    fn test_is_internal_tool_for_internal_server() {
+        use crate::core::config::{McpConfig, McpServerConfig, McpTransport};
+
+        let config = McpConfig {
+            servers: vec![McpServerConfig {
+                name: "internal-server".to_string(),
+                transport: McpTransport::Sse {
+                    url: "http://localhost:3000/sse".to_string(),
+                    token: None,
+                    headers: HashMap::new(),
+                },
+                proxy: None,
+                required: false,
+                tools: None,
+                builtin_type: None,
+                builtin_tool_name: None,
+                internal: true,
+            }],
+            ..Default::default()
+        };
+
+        let orchestrator = McpOrchestrator::new_test_with_config(config);
+        orchestrator
+            .tool_inventory()
+            .insert_entry(ToolEntry::from_server_tool(
+                "internal-server",
+                create_test_tool("internal_search"),
+            ));
+
+        let session = McpToolSession::new(
+            &orchestrator,
+            vec![McpServerBinding {
+                label: "internal-label".to_string(),
+                server_key: "internal-server".to_string(),
+                allowed_tools: None,
+            }],
+            "test-request",
+        );
+
+        assert!(session.has_exposed_tool("internal_search"));
+        assert!(session.is_internal_tool("internal_search"));
+        assert!(session.is_internal_server_label("internal-label"));
     }
 
     /// Verify that `inject_mcp_output_items` produces the exact ordering:
