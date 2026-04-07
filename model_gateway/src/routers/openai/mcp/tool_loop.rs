@@ -118,6 +118,7 @@ pub(crate) async fn execute_streaming_tool_calls(
 
         let response_format = session.tool_response_format(&call.name);
         let server_label = session.resolve_tool_server_label(&call.name);
+        let suppress_client_events = session.is_internal_server_label(&server_label);
 
         let arguments: Value = match serde_json::from_str(args_str) {
             Ok(v) => v,
@@ -133,7 +134,9 @@ pub(crate) async fn execute_streaming_tool_calls(
                     &call.name,
                     &call.arguments_buffer,
                 );
-                if !send_tool_call_completion_events(tx, &call, &mcp_call_item, sequence_number) {
+                if !suppress_client_events
+                    && !send_tool_call_completion_events(tx, &call, &mcp_call_item, sequence_number)
+                {
                     return false;
                 }
                 state.record_call(
@@ -147,7 +150,9 @@ pub(crate) async fn execute_streaming_tool_calls(
             }
         };
 
-        if !send_tool_call_intermediate_event(tx, &call, &response_format, sequence_number) {
+        if !suppress_client_events
+            && !send_tool_call_intermediate_event(tx, &call, &response_format, sequence_number)
+        {
             return false;
         }
 
@@ -177,7 +182,9 @@ pub(crate) async fn execute_streaming_tool_calls(
             json!({})
         });
 
-        if !send_tool_call_completion_events(tx, &call, &mcp_call_item, sequence_number) {
+        if !suppress_client_events
+            && !send_tool_call_completion_events(tx, &call, &mcp_call_item, sequence_number)
+        {
             return false;
         }
 
@@ -286,6 +293,10 @@ pub(crate) fn send_mcp_list_tools_events(
     sequence_number: &mut u64,
     server_key: &str,
 ) -> bool {
+    if session.is_internal_server_label(server_label) {
+        return true;
+    }
+
     let tools_item_full = session.build_mcp_list_tools_json(server_label, server_key);
     let item_id = tools_item_full
         .get("id")

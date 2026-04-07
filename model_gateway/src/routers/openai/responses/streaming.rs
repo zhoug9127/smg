@@ -120,6 +120,15 @@ pub(super) fn apply_event_transformations_inplace(
                     }
                 }
             }
+
+            let mut response_value = Value::Object(response_obj.clone());
+            restore_original_tools(&mut response_value, ctx.original_request, ctx.session);
+            if let Some(restored_obj) = response_value.as_object() {
+                if restored_obj != response_obj {
+                    *response_obj = restored_obj.clone();
+                    changed = true;
+                }
+            }
         }
     }
 
@@ -239,6 +248,7 @@ fn map_event_name(event_name: &str) -> &str {
 fn send_buffered_arguments(
     parsed_data: &mut Value,
     handler: &StreamingToolHandler,
+    session: Option<&McpToolSession<'_>>,
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
     sequence_number: &mut u64,
     mapped_output_index: &mut Option<usize>,
@@ -259,6 +269,10 @@ fn send_buffered_arguments(
     else {
         return true;
     };
+
+    if is_internal_streaming_tool_name(call.name.as_str(), session) {
+        return true;
+    }
 
     let arguments_value = if call.arguments_buffer.is_empty() {
         "{}".to_string()
@@ -352,12 +366,17 @@ pub(super) fn forward_streaming_event(
         return true;
     }
 
+    if should_suppress_internal_streaming_event(&parsed_data, event_name, handler, ctx) {
+        return true;
+    }
+
     // Handle function_call_arguments.done - send buffered args first
     let mut mapped_output_index: Option<usize> = None;
     if event_name == Some(FunctionCallEvent::ARGUMENTS_DONE)
         && !send_buffered_arguments(
             &mut parsed_data,
             handler,
+            ctx.session,
             tx,
             sequence_number,
             &mut mapped_output_index,
@@ -415,6 +434,34 @@ pub(super) fn forward_streaming_event(
     }
 
     true
+}
+
+fn should_suppress_internal_streaming_event(
+    parsed_data: &Value,
+    event_name: Option<&str>,
+    handler: &StreamingToolHandler,
+    ctx: &StreamingEventContext<'_>,
+) -> bool {
+    match event_name {
+        Some(OutputItemEvent::ADDED | OutputItemEvent::DONE) => parsed_data
+            .get("item")
+            .and_then(|item| item.get("name"))
+            .and_then(|value| value.as_str())
+            .is_some_and(|tool_name| is_internal_streaming_tool_name(tool_name, ctx.session)),
+        Some(FunctionCallEvent::ARGUMENTS_DONE) => extract_output_index(parsed_data)
+            .and_then(|output_index| {
+                handler
+                    .pending_calls
+                    .iter()
+                    .find(|call| call.output_index == output_index)
+            })
+            .is_some_and(|call| is_internal_streaming_tool_name(call.name.as_str(), ctx.session)),
+        _ => false,
+    }
+}
+
+fn is_internal_streaming_tool_name(tool_name: &str, session: Option<&McpToolSession<'_>>) -> bool {
+    session.is_some_and(|session| session.is_internal_tool(tool_name))
 }
 
 /// Inject in_progress event after a tool call item is added.
@@ -822,6 +869,10 @@ pub(super) fn handle_streaming_with_tool_interception(
                                         seen_in_progress = true;
                                         if !mcp_list_tools_sent {
                                             for binding in session.mcp_servers() {
+                                                if session.is_internal_server_label(&binding.label)
+                                                {
+                                                    continue;
+                                                }
                                                 let list_tools_index =
                                                     handler.allocate_synthetic_output_index();
                                                 if !send_mcp_list_tools_events(
